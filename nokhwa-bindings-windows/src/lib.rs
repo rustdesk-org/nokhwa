@@ -40,7 +40,6 @@ pub mod wmf {
         borrow::Cow,
         cell::Cell,
         mem::MaybeUninit,
-        slice::from_raw_parts,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
@@ -75,7 +74,7 @@ pub mod wmf {
                     MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_READWRITE_DISABLE_CONVERTERS,
                 },
             },
-            System::Com::{CoInitializeEx, CoUninitialize, COINIT},
+            System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT},
         },
     };
 
@@ -224,6 +223,63 @@ pub mod wmf {
         Ok(())
     }
 
+    pub(crate) struct ActivateList {
+        ptr: *mut Option<IMFActivate>,
+        count: usize,
+    }
+
+    impl ActivateList {
+        pub(crate) unsafe fn new(ptr: *mut Option<IMFActivate>, count: usize) -> Option<Self> {
+            if ptr.is_null() || count == 0 {
+                return None;
+            }
+
+            Some(Self { ptr, count })
+        }
+
+        /// Safety: The pointer returned by this method MUST NOT be used after
+        /// `self` has gone out of scope. This pointer may also be null.
+        pub(crate) unsafe fn iter(&self) -> ActivateIterator {
+            ActivateIterator {
+                current: self.ptr,
+                remaining: self.count,
+            }
+        }
+    }
+
+    pub(crate) struct ActivateIterator {
+        current: *mut Option<IMFActivate>,
+        remaining: usize,
+    }
+
+    impl Iterator for ActivateIterator {
+        type Item = Option<IMFActivate>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.remaining == 0 || self.current.is_null() {
+                return None;
+            }
+
+            // Safety: We check for null and bounds
+            let result = unsafe { (*self.current).clone() };
+            self.current = unsafe { self.current.add(1) };
+            self.remaining -= 1;
+
+            Some(result)
+        }
+    }
+
+    impl Drop for ActivateList {
+        fn drop(&mut self) {
+            if !self.ptr.is_null() && self.count > 0 {
+                unsafe {
+                    // Free the memory allocated by MFEnumDeviceSources
+                    CoTaskMemFree(Some(self.ptr as *mut _));
+                }
+            }
+        }
+    }
+
     fn query_activate_pointers() -> Result<Vec<IMFActivate>, NokhwaError> {
         initialize_mf()?;
 
@@ -273,15 +329,24 @@ pub mod wmf {
             });
         }
 
-        let mut device_list = vec![];
+        let activate_list = unsafe {
+            ActivateList::new(unused_mf_activate.assume_init(), count as usize).ok_or_else(
+                || NokhwaError::StructureError {
+                    structure: "ActivateList".to_string(),
+                    error: "Invalid pointer alignment or null pointer".to_string(),
+                },
+            )?
+        };
 
-        unsafe { from_raw_parts(unused_mf_activate.assume_init(), count as usize) }
-            .iter()
-            .for_each(|pointer| {
-                if let Some(imf_activate) = pointer {
-                    device_list.push(imf_activate.clone());
+        let mut device_list = Vec::new();
+
+        unsafe {
+            for activate in activate_list.iter() {
+                if let Some(imf_activate) = activate {
+                    device_list.push(imf_activate);
                 }
-            });
+            }
+        }
 
         Ok(device_list)
     }
