@@ -14,6 +14,8 @@ keywords = ["media-foundation", "windows", "capture", "webcam"]
 docs-only = []
 
 [dependencies]
+dlopen = "0.1"
+lazy_static = "1.4"
 
 [dependencies.nokhwa-core]
 version = "0.1"
