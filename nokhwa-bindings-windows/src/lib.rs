@@ -27,8 +27,11 @@
 //!
 //! No support or API stability will be given. Subject to change at any time.
 
+mod mf_wrapper;
+
 #[cfg(all(windows, not(feature = "docs-only")))]
 pub mod wmf {
+    use super::mf_wrapper::*;
     use nokhwa_core::error::NokhwaError;
     use nokhwa_core::types::{
         ApiBackend, CameraControl, CameraFormat, CameraIndex, CameraInfo, ControlValueDescription,
@@ -47,7 +50,7 @@ pub mod wmf {
     };
     use windows::Win32::Media::DirectShow::{CameraControl_Flags_Auto, CameraControl_Flags_Manual};
     use windows::Win32::Media::MediaFoundation::{
-        IMFMediaType, MFCreateSample, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+        IMFMediaType, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
     };
     use windows::{
         core::{Interface, GUID, PWSTR},
@@ -64,10 +67,8 @@ pub mod wmf {
                 KernelStreaming::GUID_NULL,
                 MediaFoundation::{
                     IMFActivate, IMFAttributes, IMFMediaSource, IMFSample, IMFSourceReader,
-                    MFCreateAttributes, MFCreateMediaType, MFCreateSourceReaderFromMediaSource,
-                    MFEnumDeviceSources, MFMediaType_Video, MFShutdown, MFStartup,
-                    MFSTARTUP_NOSOCKET, MF_API_VERSION, MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
-                    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                    MFMediaType_Video, MFSTARTUP_NOSOCKET, MF_API_VERSION,
+                    MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
                     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
                     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_FRAME_RATE,
                     MF_MT_FRAME_RATE_RANGE_MAX, MF_MT_FRAME_RATE_RANGE_MIN, MF_MT_FRAME_SIZE,
