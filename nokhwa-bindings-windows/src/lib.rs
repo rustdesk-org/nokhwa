@@ -27,6 +27,7 @@
 //!
 //! No support or API stability will be given. Subject to change at any time.
 
+#[cfg(all(windows, not(feature = "docs-only")))]
 mod mf_wrapper;
 
 #[cfg(all(windows, not(feature = "docs-only")))]
