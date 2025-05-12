@@ -7,10 +7,11 @@
 use core::ffi::c_void;
 use dlopen::symbor::Library;
 use lazy_static;
-use windows::Win32::Media::MediaFoundation::{IMFActivate, IMFAttributes, IMFMediaSource, IMFMediaType, IMFSample, IMFSourceReader};
-use std::io::Result;
 use std::sync::{Arc, Mutex};
 use windows::core::HRESULT;
+use windows::Win32::Media::MediaFoundation::{
+    IMFActivate, IMFAttributes, IMFMediaSource, IMFMediaType, IMFSample, IMFSourceReader,
+};
 
 type UINT32 = u32;
 type ULONG = std::os::raw::c_ulong;
@@ -27,16 +28,7 @@ macro_rules! make_lib_wrapper {
 
         impl $s {
             fn new() -> Self {
-                let lib_name = match get_lib_name($dll) {
-                    Ok(name) => name,
-                    Err(e) => {
-                        eprintln!("Failed to get lib name, {}", e);
-                        return Self {
-                            _lib: None,
-                            $( $field: None ),+
-                        };
-                    }
-                };
+                let lib_name = get_lib_name($dll);
                 let lib = match Library::open(&lib_name) {
                     Ok(lib) => Some(lib),
                     Err(e) => {
@@ -48,7 +40,7 @@ macro_rules! make_lib_wrapper {
                 $(let $field = if let Some(lib) = &lib {
                     match unsafe { lib.symbol::<$tp>(stringify!($field)) } {
                         Ok(m) => {
-                            eprintln!("method found {}", stringify!($field));
+                            // println!("method found {}", stringify!($field));
                             Some(*m)
                         },
                         Err(e) => {
@@ -75,28 +67,8 @@ macro_rules! make_lib_wrapper {
     }
 }
 
-fn get_lib_name(dll_name: &str) -> Result<String> {
-    let exe_file = std::env::current_exe()?;
-    if let Some(cur_dir) = exe_file.parent() {
-        let dll_name = format!("{}.dll", dll_name);
-        let full_path = cur_dir.join(dll_name);
-        if !full_path.exists() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{} not found", full_path.to_string_lossy().as_ref()),
-            ))
-        } else {
-            Ok(full_path.to_string_lossy().into_owned())
-        }
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!(
-                "Invalid exe parent for {}",
-                exe_file.to_string_lossy().as_ref()
-            ),
-        ))
-    }
+fn get_lib_name(dll_name: &str) -> String {
+    format!("{}.dll", dll_name)
 }
 
 pub type FnMFEnumDeviceSources = fn(*mut c_void, *mut *mut *mut c_void, *mut UINT32) -> HRESULT;
@@ -127,7 +99,7 @@ pub type FnMFCreateSourceReaderFromMediaSource =
     fn(*mut c_void, *mut c_void, *mut *mut c_void) -> HRESULT;
 make_lib_wrapper!(
     MFReadWriteWrapper,
-    "fmreadwrite",
+    "mfreadwrite",
     MFCreateSourceReaderFromMediaSource: FnMFCreateSourceReaderFromMediaSource
 );
 
