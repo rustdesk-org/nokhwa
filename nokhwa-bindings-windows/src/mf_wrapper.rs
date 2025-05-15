@@ -40,11 +40,11 @@ macro_rules! make_lib_wrapper {
                 $(let $field = if let Some(lib) = &lib {
                     match unsafe { lib.symbol::<$tp>(stringify!($field)) } {
                         Ok(m) => {
-                            // println!("method found {}", stringify!($field));
+                            // println!("Successfully loaded function: {}", stringify!($field));
                             Some(*m)
                         },
                         Err(e) => {
-                            eprintln!("Failed to load func {}, {}", stringify!($field), e);
+                            eprintln!("Failed to load func {}: {}", stringify!($field), e);
                             None
                         }
                     }
@@ -71,7 +71,8 @@ fn get_lib_name(dll_name: &str) -> String {
     format!("{}.dll", dll_name)
 }
 
-pub type FnMFEnumDeviceSources = fn(*mut c_void, *mut *mut *mut c_void, *mut UINT32) -> HRESULT;
+pub type FnMFEnumDeviceSources =
+    unsafe extern "system" fn(*mut c_void, *mut *mut *mut c_void, *mut UINT32) -> HRESULT;
 
 make_lib_wrapper!(
     MFWrapper,
@@ -79,11 +80,11 @@ make_lib_wrapper!(
     MFEnumDeviceSources: FnMFEnumDeviceSources
 );
 
-pub type FnMFCreateMediaType = fn(*mut *mut c_void) -> HRESULT;
-pub type FnMFCreateAttributes = fn(*mut *mut c_void, UINT32) -> HRESULT;
-pub type FnMFStartup = fn(ULONG, DWORD) -> HRESULT;
-pub type FnMFShutdown = fn() -> HRESULT;
-pub type FnMFCreateSample = fn(*mut *mut c_void) -> HRESULT;
+pub type FnMFCreateMediaType = unsafe extern "system" fn(*mut *mut c_void) -> HRESULT;
+pub type FnMFCreateAttributes = unsafe extern "system" fn(*mut *mut c_void, UINT32) -> HRESULT;
+pub type FnMFStartup = unsafe extern "system" fn(ULONG, DWORD) -> HRESULT;
+pub type FnMFShutdown = unsafe extern "system" fn() -> HRESULT;
+pub type FnMFCreateSample = unsafe extern "system" fn(*mut *mut c_void) -> HRESULT;
 
 make_lib_wrapper!(
     MFPlatWrapper,
@@ -96,7 +97,8 @@ make_lib_wrapper!(
 );
 
 pub type FnMFCreateSourceReaderFromMediaSource =
-    fn(*mut c_void, *mut c_void, *mut *mut c_void) -> HRESULT;
+    unsafe extern "system" fn(*mut c_void, *mut c_void, *mut *mut c_void) -> HRESULT;
+
 make_lib_wrapper!(
     MFReadWriteWrapper,
     "mfreadwrite",
@@ -199,5 +201,15 @@ where
         .from_abi::<IMFSourceReader>(result__)
     } else {
         Err(HRESULT_ERR_NO_INTERFACE.into())
+    }
+}
+
+impl Drop for MFPlatWrapper {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(f) = self.MFShutdown {
+                let _ = f().ok();
+            }
+        }
     }
 }
