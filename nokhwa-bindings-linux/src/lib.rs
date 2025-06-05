@@ -215,7 +215,7 @@ mod internal {
                 let fps = match device.params() {
                     Ok(params) => {
                         if params.interval.numerator != 1
-                            || params.interval.denominator % params.interval.numerator != 0
+                            && params.interval.denominator % params.interval.numerator != 0
                         {
                             return Err(NokhwaError::GetPropertyError {
                                 property: "V4L2 FrameRate".to_string(),
@@ -363,7 +363,7 @@ mod internal {
                 camera_formats.append(&mut formats);
             }
 
-            let format = cam_fmt
+            let mut format = cam_fmt
                 .fulfill(&camera_formats)
                 .ok_or(NokhwaError::GetPropertyError {
                     property: "CameraFormat".to_string(),
@@ -371,31 +371,34 @@ mod internal {
                 })?;
 
             let current_format = get_device_format(&device)?;
-
-            if current_format.width() != format.width()
-                || current_format.height() != format.height()
-                || current_format.format() != format.format()
-            {
-                if let Err(why) = device.set_format(&Format::new(
-                    format.width(),
-                    format.height(),
-                    frameformat_to_fourcc(format.format()),
-                )) {
-                    return Err(NokhwaError::SetPropertyError {
-                        property: "Resolution, FrameFormat".to_string(),
-                        value: format.to_string(),
-                        error: why.to_string(),
-                    });
+            if cam_fmt.requested_format_type() == RequestedFormatType::None {
+                format = current_format;
+            } else {
+                if current_format.width() != format.width()
+                    || current_format.height() != format.height()
+                    || current_format.format() != format.format()
+                {
+                    if let Err(why) = device.set_format(&Format::new(
+                        format.width(),
+                        format.height(),
+                        frameformat_to_fourcc(format.format()),
+                    )) {
+                        return Err(NokhwaError::SetPropertyError {
+                            property: "Resolution, FrameFormat".to_string(),
+                            value: format.to_string(),
+                            error: why.to_string(),
+                        });
+                    }
                 }
-            }
 
-            if current_format.frame_rate() != format.frame_rate() {
-                if let Err(why) = device.set_params(&Parameters::with_fps(format.frame_rate())) {
-                    return Err(NokhwaError::SetPropertyError {
-                        property: "Frame rate".to_string(),
-                        value: format.frame_rate().to_string(),
-                        error: why.to_string(),
-                    });
+                if current_format.frame_rate() != format.frame_rate() {
+                    if let Err(why) = device.set_params(&Parameters::with_fps(format.frame_rate())) {
+                        return Err(NokhwaError::SetPropertyError {
+                            property: "Frame rate".to_string(),
+                            value: format.frame_rate().to_string(),
+                            error: why.to_string(),
+                        });
+                    }
                 }
             }
 
