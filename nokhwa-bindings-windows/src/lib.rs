@@ -630,7 +630,7 @@ pub mod wmf {
 
         pub fn compatible_format_list(&mut self) -> Result<Vec<CameraFormat>, NokhwaError> {
             let mut camera_format_list = vec![];
-            let mut index = 0;
+            let mut index: u32 = 0;
 
             // https://learn.microsoft.com/en-us/windows/win32/api/mfreadwrite/nf-mfreadwrite-imfsourcereader-getnativemediatype
             while let Ok(media_type) = unsafe {
