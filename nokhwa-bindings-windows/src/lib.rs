@@ -630,8 +630,10 @@ pub mod wmf {
 
         pub fn compatible_format_list(&mut self) -> Result<Vec<CameraFormat>, NokhwaError> {
             let mut camera_format_list = vec![];
-            let mut index = 0;
+            let mut index: u32 = 0;
 
+            // https://learn.microsoft.com/en-us/windows/win32/api/mfreadwrite/nf-mfreadwrite-imfsourcereader-getnativemediatype
+            // https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/Media/MediaFoundation/struct.IMFSourceReader.html#method.GetNativeMediaType
             while let Ok(media_type) = unsafe {
                 self.source_reader
                     .GetNativeMediaType(MEDIA_FOUNDATION_FIRST_VIDEO_STREAM, index)
@@ -706,7 +708,15 @@ pub mod wmf {
 
                 let frame_fmt = match guid_to_frameformat(fourcc) {
                     Some(fcc) => fcc,
-                    None => continue,
+                    None => {
+                        index += 1;
+                        // This condition should not be hit in normal cases.
+                        // But we still add the check to ensure we can break out of the loop.
+                        if index == 0 {
+                            break;
+                        }
+                        continue;
+                    }
                 };
 
                 for frame_rate in framerate_list {
@@ -720,6 +730,11 @@ pub mod wmf {
                 }
 
                 index += 1;
+                // This condition should not be hit in normal cases.
+                // But we still add the check to ensure we can break out of the loop.
+                if index == 0 {
+                    break;
+                }
             }
             Ok(camera_format_list)
         }
