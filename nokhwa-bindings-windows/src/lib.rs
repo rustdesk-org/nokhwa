@@ -51,7 +51,7 @@ pub mod wmf {
     };
     use windows::Win32::Media::DirectShow::{CameraControl_Flags_Auto, CameraControl_Flags_Manual};
     use windows::Win32::Media::MediaFoundation::{
-        IMFMediaType, MF_SOURCE_READER_CURRENT_TYPE_INDEX, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+        IMFMediaType, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
     };
     use windows::{
         core::{Interface, GUID, PWSTR},
@@ -633,6 +633,7 @@ pub mod wmf {
             let mut index: u32 = 0;
 
             // https://learn.microsoft.com/en-us/windows/win32/api/mfreadwrite/nf-mfreadwrite-imfsourcereader-getnativemediatype
+            // https://microsoft.github.io/windows-docs-rs/doc/windows/Win32/Media/MediaFoundation/struct.IMFSourceReader.html#method.GetNativeMediaType
             while let Ok(media_type) = unsafe {
                 self.source_reader
                     .GetNativeMediaType(MEDIA_FOUNDATION_FIRST_VIDEO_STREAM, index)
@@ -708,10 +709,12 @@ pub mod wmf {
                 let frame_fmt = match guid_to_frameformat(fourcc) {
                     Some(fcc) => fcc,
                     None => {
-                        if index == MF_SOURCE_READER_CURRENT_TYPE_INDEX.0 as u32 {
+                        index += 1;
+                        // This condition should not be hit in normal cases.
+                        // But we still add the check to ensure we can break out of the loop.
+                        if index == 0 {
                             break;
                         }
-                        index += 1;
                         continue;
                     }
                 };
@@ -726,10 +729,12 @@ pub mod wmf {
                     }
                 }
 
-                if index == MF_SOURCE_READER_CURRENT_TYPE_INDEX.0 as u32 {
+                index += 1;
+                // This condition should not be hit in normal cases.
+                // But we still add the check to ensure we can break out of the loop.
+                if index == 0 {
                     break;
                 }
-                index += 1;
             }
             Ok(camera_format_list)
         }
