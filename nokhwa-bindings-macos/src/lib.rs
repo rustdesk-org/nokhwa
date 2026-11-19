@@ -124,6 +124,28 @@ mod internal {
             ) -> *mut std::os::raw::c_void;
 
             pub fn CVPixelBufferGetPixelFormatType(pixelBuffer: CVPixelBufferRef) -> OSType;
+
+            pub fn CVPixelBufferGetPlaneCount(pixelBuffer: CVPixelBufferRef) -> usize;
+
+            pub fn CVPixelBufferGetBaseAddressOfPlane(
+                pixelBuffer: CVPixelBufferRef,
+                planeIndex: usize,
+            ) -> *mut std::os::raw::c_void;
+
+            pub fn CVPixelBufferGetBytesPerRowOfPlane(
+                pixelBuffer: CVPixelBufferRef,
+                planeIndex: usize,
+            ) -> usize;
+
+            pub fn CVPixelBufferGetWidthOfPlane(
+                pixelBuffer: CVPixelBufferRef,
+                planeIndex: usize,
+            ) -> usize;
+
+            pub fn CVPixelBufferGetHeightOfPlane(
+                pixelBuffer: CVPixelBufferRef,
+                planeIndex: usize,
+            ) -> usize;
         }
 
         #[repr(C)]
@@ -204,7 +226,9 @@ mod internal {
         AVMediaTypeMetadataObject, AVMediaTypeMuxed, AVMediaTypeSubtitle, AVMediaTypeText,
         AVMediaTypeTimecode, AVMediaTypeVideo, CGPoint, CMSampleBufferGetImageBuffer,
         CMVideoFormatDescriptionGetDimensions, CVImageBufferRef, CVPixelBufferGetBaseAddress,
-        CVPixelBufferGetDataSize, CVPixelBufferLockBaseAddress, CVPixelBufferUnlockBaseAddress,
+        CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+        CVPixelBufferGetDataSize, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPlaneCount,
+        CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferUnlockBaseAddress,
         NSObject, OSType,
     };
 
@@ -418,11 +442,38 @@ mod internal {
                     CVPixelBufferLockBaseAddress(image_buffer, 0);
                 };
 
-                let buffer_length = unsafe { CVPixelBufferGetDataSize(image_buffer) };
-                let buffer_ptr = unsafe { CVPixelBufferGetBaseAddress(image_buffer) };
-                let buffer_as_vec = unsafe {
-                    std::slice::from_raw_parts_mut(buffer_ptr as *mut u8, buffer_length as usize)
-                        .to_vec()
+                // Bi-planar buffers (e.g. NV12) have no single base address: copy every plane row by
+                // row so that the result is tightly packed (no per-row padding), which is what the
+                // NV12 => RGB conversion expects (width * height * 3 / 2 bytes).
+                let plane_count = unsafe { CVPixelBufferGetPlaneCount(image_buffer) };
+                let buffer_as_vec = if plane_count > 0 {
+                    let mut out = Vec::new();
+                    for plane in 0..plane_count {
+                        let base = unsafe { CVPixelBufferGetBaseAddressOfPlane(image_buffer, plane) }
+                            as *const u8;
+                        if base.is_null() {
+                            continue;
+                        }
+                        let stride = unsafe { CVPixelBufferGetBytesPerRowOfPlane(image_buffer, plane) };
+                        let width = unsafe { CVPixelBufferGetWidthOfPlane(image_buffer, plane) };
+                        let height = unsafe { CVPixelBufferGetHeightOfPlane(image_buffer, plane) };
+                        // Plane 0 is luma (1 byte per pixel); the chroma plane is interleaved CbCr (2 bytes per sample).
+                        let row_bytes = if plane == 0 { width } else { width * 2 }.min(stride);
+                        out.reserve(row_bytes * height);
+                        for row in 0..height {
+                            let line =
+                                unsafe { std::slice::from_raw_parts(base.add(row * stride), row_bytes) };
+                            out.extend_from_slice(line);
+                        }
+                    }
+                    out
+                } else {
+                    let buffer_length = unsafe { CVPixelBufferGetDataSize(image_buffer) };
+                    let buffer_ptr = unsafe { CVPixelBufferGetBaseAddress(image_buffer) };
+                    unsafe {
+                        std::slice::from_raw_parts_mut(buffer_ptr as *mut u8, buffer_length as usize)
+                            .to_vec()
+                    }
                 };
 
                 unsafe { CVPixelBufferUnlockBaseAddress(image_buffer, 0) };
@@ -2282,7 +2333,7 @@ mod internal {
                 FrameFormat::YUYV => kCMPixelFormat_422YpCbCr8_yuvs,
                 FrameFormat::MJPEG => kCMVideoCodecType_JPEG,
                 FrameFormat::GRAY => kCMPixelFormat_8IndexedGray_WhiteIsZero,
-                FrameFormat::NV12 => kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                FrameFormat::NV12 => kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
                 FrameFormat::RAWRGB => kCMPixelFormat_24RGB,
             };
             let obj = CFNumber::from(cmpixelfmt as i32);
