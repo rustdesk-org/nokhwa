@@ -227,7 +227,8 @@ mod internal {
         AVMediaTypeTimecode, AVMediaTypeVideo, CGPoint, CMSampleBufferGetImageBuffer,
         CMVideoFormatDescriptionGetDimensions, CVImageBufferRef, CVPixelBufferGetBaseAddress,
         CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
-        CVPixelBufferGetDataSize, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPlaneCount,
+        CVPixelBufferGetDataSize, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType,
+        CVPixelBufferGetPlaneCount,
         CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferUnlockBaseAddress,
         NSObject, OSType,
     };
@@ -246,6 +247,7 @@ mod internal {
     use core_video_sys::{
         kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
         kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
     };
     use flume::{Receiver, Sender};
     use nokhwa_core::{
@@ -442,11 +444,16 @@ mod internal {
                     CVPixelBufferLockBaseAddress(image_buffer, 0);
                 };
 
-                // Bi-planar buffers (e.g. NV12) have no single base address: copy every plane row by
-                // row so that the result is tightly packed (no per-row padding), which is what the
-                // NV12 => RGB conversion expects (width * height * 3 / 2 bytes).
+                // For bi-planar buffers (NV12), CVPixelBufferGetBaseAddress points at a
+                // CVPlanarPixelBufferInfo_YCbCrBiPlanar header and GetDataSize covers that header
+                // plus padding, so a single copy yields the wrong bytes and length. Copy each plane
+                // row by row instead, giving the tightly packed width * height * 3 / 2 bytes that
+                // the NV12 => RGB conversion expects.
                 let plane_count = unsafe { CVPixelBufferGetPlaneCount(image_buffer) };
-                let buffer_as_vec = if plane_count > 0 {
+                let pixel_format = unsafe { CVPixelBufferGetPixelFormatType(image_buffer) };
+                let is_8bit_nv12 = pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                    || pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+                let buffer_as_vec = if plane_count > 0 && is_8bit_nv12 {
                     let mut out = Vec::new();
                     for plane in 0..plane_count {
                         let base = unsafe { CVPixelBufferGetBaseAddressOfPlane(image_buffer, plane) }
@@ -2333,7 +2340,7 @@ mod internal {
                 FrameFormat::YUYV => kCMPixelFormat_422YpCbCr8_yuvs,
                 FrameFormat::MJPEG => kCMVideoCodecType_JPEG,
                 FrameFormat::GRAY => kCMPixelFormat_8IndexedGray_WhiteIsZero,
-                FrameFormat::NV12 => kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                FrameFormat::NV12 => kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                 FrameFormat::RAWRGB => kCMPixelFormat_24RGB,
             };
             let obj = CFNumber::from(cmpixelfmt as i32);
