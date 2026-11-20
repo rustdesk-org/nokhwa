@@ -232,10 +232,8 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
         id: KnownCameraControl,
         value: ControlValueSetter,
     ) -> Result<(), NokhwaError> {
-        self.device.lock()?;
-        let res = self.device.set_control(id, value);
-        self.device.unlock();
-        res
+        self.device
+            .configure(|device| device.set_control(id, value))
     }
 
     fn open_stream(&mut self) -> Result<(), NokhwaError> {
@@ -246,16 +244,22 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
         session.begin_configuration();
         session.add_input(&input)?;
 
-        self.device.set_all(self.format)?; // hurr durr im an apple api and im fucking dumb hurr durr
-
+        let format = self.format;
         let bufname = &self.buffer_name;
-        let videocallback = AVCaptureVideoCallback::new(bufname, &self.fbufsnd)?;
-        let output = AVCaptureVideoDataOutput::new();
-        output.add_delegate(&videocallback)?;
-        output.set_frame_format(self.camera_format().format())?;
-        session.add_output(&output)?;
-        session.commit_configuration();
-        session.start()?;
+        let fbufsnd = &self.fbufsnd;
+        // Stay locked until the session runs: starting it unlocked can reset the active format.
+        // ffmpeg's avfoundation.m also unlocks only after startRunning.
+        let (videocallback, output) = self.device.configure(|device| {
+            device.set_all_locked(format)?;
+            let videocallback = AVCaptureVideoCallback::new(bufname, fbufsnd)?;
+            let output = AVCaptureVideoDataOutput::new();
+            output.add_delegate(&videocallback)?;
+            output.set_frame_format(format.format())?;
+            session.add_output(&output)?;
+            session.commit_configuration();
+            session.start()?;
+            Ok((videocallback, output))
+        })?;
 
         self.dev_input = Some(input);
         self.session = Some(session);
@@ -288,7 +292,13 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
     }
 
     fn frame_raw(&mut self) -> Result<Cow<[u8]>, NokhwaError> {
-        let result = match self.frame_buffer_receiver.recv() {
+        // The sender lives in this same struct, so the channel never disconnects: without a
+        // timeout a camera that stops delivering frames (e.g. an unplugged USB webcam) would
+        // block the caller forever.
+        let result = match self
+            .frame_buffer_receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+        {
             Ok(recv) => Ok(Cow::from(recv.0)),
             Err(why) => Err(NokhwaError::ReadFrameError(why.to_string())),
         };
@@ -348,7 +358,6 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
 impl Drop for AVFoundationCaptureDevice {
     fn drop(&mut self) {
         if self.stop_stream().is_err() {}
-        self.device.unlock();
     }
 }
 

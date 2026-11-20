@@ -124,6 +124,28 @@ mod internal {
             ) -> *mut std::os::raw::c_void;
 
             pub fn CVPixelBufferGetPixelFormatType(pixelBuffer: CVPixelBufferRef) -> OSType;
+
+            pub fn CVPixelBufferGetPlaneCount(pixelBuffer: CVPixelBufferRef) -> usize;
+
+            pub fn CVPixelBufferGetBaseAddressOfPlane(
+                pixelBuffer: CVPixelBufferRef,
+                planeIndex: usize,
+            ) -> *mut std::os::raw::c_void;
+
+            pub fn CVPixelBufferGetBytesPerRowOfPlane(
+                pixelBuffer: CVPixelBufferRef,
+                planeIndex: usize,
+            ) -> usize;
+
+            pub fn CVPixelBufferGetWidthOfPlane(
+                pixelBuffer: CVPixelBufferRef,
+                planeIndex: usize,
+            ) -> usize;
+
+            pub fn CVPixelBufferGetHeightOfPlane(
+                pixelBuffer: CVPixelBufferRef,
+                planeIndex: usize,
+            ) -> usize;
         }
 
         #[repr(C)]
@@ -204,7 +226,10 @@ mod internal {
         AVMediaTypeMetadataObject, AVMediaTypeMuxed, AVMediaTypeSubtitle, AVMediaTypeText,
         AVMediaTypeTimecode, AVMediaTypeVideo, CGPoint, CMSampleBufferGetImageBuffer,
         CMVideoFormatDescriptionGetDimensions, CVImageBufferRef, CVPixelBufferGetBaseAddress,
-        CVPixelBufferGetDataSize, CVPixelBufferLockBaseAddress, CVPixelBufferUnlockBaseAddress,
+        CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
+        CVPixelBufferGetDataSize, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType,
+        CVPixelBufferGetPlaneCount,
+        CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferUnlockBaseAddress,
         NSObject, OSType,
     };
 
@@ -222,6 +247,7 @@ mod internal {
     use core_video_sys::{
         kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
         kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
     };
     use flume::{Receiver, Sender};
     use nokhwa_core::{
@@ -246,7 +272,7 @@ mod internal {
         convert::TryFrom,
         error::Error,
         ffi::{c_float, c_void, CStr},
-        sync::Arc,
+        sync::{Arc, Mutex, PoisonError},
     };
 
     const UTF8_ENCODING: usize = 4;
@@ -418,11 +444,43 @@ mod internal {
                     CVPixelBufferLockBaseAddress(image_buffer, 0);
                 };
 
-                let buffer_length = unsafe { CVPixelBufferGetDataSize(image_buffer) };
-                let buffer_ptr = unsafe { CVPixelBufferGetBaseAddress(image_buffer) };
-                let buffer_as_vec = unsafe {
-                    std::slice::from_raw_parts_mut(buffer_ptr as *mut u8, buffer_length as usize)
-                        .to_vec()
+                // For bi-planar buffers (NV12), CVPixelBufferGetBaseAddress points at a
+                // CVPlanarPixelBufferInfo_YCbCrBiPlanar header and GetDataSize covers that header
+                // plus padding, so a single copy yields the wrong bytes and length. Copy each plane
+                // row by row instead, giving the tightly packed width * height * 3 / 2 bytes that
+                // the NV12 => RGB conversion expects.
+                let plane_count = unsafe { CVPixelBufferGetPlaneCount(image_buffer) };
+                let pixel_format = unsafe { CVPixelBufferGetPixelFormatType(image_buffer) };
+                let is_8bit_nv12 = pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                    || pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+                let buffer_as_vec = if plane_count > 0 && is_8bit_nv12 {
+                    let mut out = Vec::new();
+                    for plane in 0..plane_count {
+                        let base = unsafe { CVPixelBufferGetBaseAddressOfPlane(image_buffer, plane) }
+                            as *const u8;
+                        if base.is_null() {
+                            continue;
+                        }
+                        let stride = unsafe { CVPixelBufferGetBytesPerRowOfPlane(image_buffer, plane) };
+                        let width = unsafe { CVPixelBufferGetWidthOfPlane(image_buffer, plane) };
+                        let height = unsafe { CVPixelBufferGetHeightOfPlane(image_buffer, plane) };
+                        // Plane 0 is luma (1 byte per pixel); the chroma plane is interleaved CbCr (2 bytes per sample).
+                        let row_bytes = if plane == 0 { width } else { width * 2 }.min(stride);
+                        out.reserve(row_bytes * height);
+                        for row in 0..height {
+                            let line =
+                                unsafe { std::slice::from_raw_parts(base.add(row * stride), row_bytes) };
+                            out.extend_from_slice(line);
+                        }
+                    }
+                    out
+                } else {
+                    let buffer_length = unsafe { CVPixelBufferGetDataSize(image_buffer) };
+                    let buffer_ptr = unsafe { CVPixelBufferGetBaseAddress(image_buffer) };
+                    unsafe {
+                        std::slice::from_raw_parts_mut(buffer_ptr as *mut u8, buffer_length as usize)
+                            .to_vec()
+                    }
                 };
 
                 unsafe { CVPixelBufferUnlockBaseAddress(image_buffer, 0) };
@@ -835,6 +893,11 @@ mod internal {
         }
     }
 
+    // lockForConfiguration is held per device by the whole process, so every AVCaptureDevice
+    // wrapper of one camera shares it and one wrapper's unlock releases the others' lock.
+    // `configure` holds this mutex so that only one configuration runs at a time.
+    static CONFIGURATION: Mutex<()> = Mutex::new(());
+
     pub struct AVCaptureDevice {
         inner: *mut Object,
         device: CameraInfo,
@@ -933,10 +996,7 @@ mod internal {
             }
         }
 
-        pub fn lock(&self) -> Result<(), NokhwaError> {
-            if self.locked {
-                return Ok(());
-            }
+        fn lock(&mut self) -> Result<(), NokhwaError> {
             if self.already_in_use() {
                 return Err(NokhwaError::InitializeError {
                     backend: ApiBackend::AVFoundation,
@@ -953,26 +1013,53 @@ mod internal {
                 });
             }
             // Space these out for debug purposes
-            if !accepted == YES {
+            // Not `!accepted == YES`: BOOL is an i8 on x86_64, where that never detects NO.
+            if accepted == NO {
                 return Err(NokhwaError::SetPropertyError {
                     property: "lockForConfiguration".to_string(),
                     value: "Locked".to_string(),
                     error: "Lock Rejected".to_string(),
                 });
             }
+            self.locked = true;
             Ok(())
         }
 
-        pub fn unlock(&mut self) {
+        fn unlock(&mut self) {
             if self.locked {
                 self.locked = false;
                 unsafe { msg_send![self.inner, unlockForConfiguration] }
             }
         }
 
-        // thank you ffmpeg
-        pub fn set_all(&mut self, descriptor: CameraFormat) -> Result<(), NokhwaError> {
+        /// Locks the device for configuration, runs `f`, then unlocks it, also when `f` fails
+        /// or panics. `f` gets a shared reference, so it cannot swap out the device that gets
+        /// unlocked. Configurations run one at a time across the process (see `CONFIGURATION`),
+        /// so `f` must not configure another camera.
+        pub fn configure<T>(
+            &mut self,
+            f: impl FnOnce(&Self) -> Result<T, NokhwaError>,
+        ) -> Result<T, NokhwaError> {
+            struct UnlockOnDrop<'a>(&'a mut AVCaptureDevice);
+            impl Drop for UnlockOnDrop<'_> {
+                fn drop(&mut self) {
+                    self.0.unlock();
+                }
+            }
+
+            let _one_at_a_time = CONFIGURATION.lock().unwrap_or_else(PoisonError::into_inner);
             self.lock()?;
+            let locked = UnlockOnDrop(self);
+            f(&*locked.0)
+        }
+
+        pub fn set_all(&mut self, descriptor: CameraFormat) -> Result<(), NokhwaError> {
+            self.configure(|device| device.set_all_locked(descriptor))
+        }
+
+        /// `set_all` for use inside `configure`.
+        // thank you ffmpeg
+        pub fn set_all_locked(&self, descriptor: CameraFormat) -> Result<(), NokhwaError> {
             let format_list = try_ns_arr_to_vec::<AVCaptureDeviceFormat, NokhwaError>(unsafe {
                 msg_send![self.inner, formats]
             })?;
@@ -1025,7 +1112,6 @@ mod internal {
             let _: () = unsafe {
                 msg_send![self.inner, setValue:min_frame_duration forKey:active_video_max_frame_duration]
             };
-            self.unlock();
             Ok(())
         }
 
@@ -1490,7 +1576,7 @@ mod internal {
         }
 
         pub fn set_control(
-            &mut self,
+            &self,
             id: KnownCameraControl,
             value: ControlValueSetter,
         ) -> Result<(), NokhwaError> {
@@ -2282,7 +2368,7 @@ mod internal {
                 FrameFormat::YUYV => kCMPixelFormat_422YpCbCr8_yuvs,
                 FrameFormat::MJPEG => kCMVideoCodecType_JPEG,
                 FrameFormat::GRAY => kCMPixelFormat_8IndexedGray_WhiteIsZero,
-                FrameFormat::NV12 => kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                FrameFormat::NV12 => kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
                 FrameFormat::RAWRGB => kCMPixelFormat_24RGB,
             };
             let obj = CFNumber::from(cmpixelfmt as i32);
