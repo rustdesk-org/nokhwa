@@ -272,7 +272,7 @@ mod internal {
         convert::TryFrom,
         error::Error,
         ffi::{c_float, c_void, CStr},
-        sync::Arc,
+        sync::{Arc, Mutex, PoisonError},
     };
 
     const UTF8_ENCODING: usize = 4;
@@ -893,6 +893,11 @@ mod internal {
         }
     }
 
+    // lockForConfiguration is held per device by the whole process, so every AVCaptureDevice
+    // wrapper of one camera shares it and one wrapper's unlock releases the others' lock.
+    // `configure` holds this mutex so that only one configuration runs at a time.
+    static CONFIGURATION: Mutex<()> = Mutex::new(());
+
     pub struct AVCaptureDevice {
         inner: *mut Object,
         device: CameraInfo,
@@ -991,10 +996,7 @@ mod internal {
             }
         }
 
-        pub fn lock(&self) -> Result<(), NokhwaError> {
-            if self.locked {
-                return Ok(());
-            }
+        fn lock(&mut self) -> Result<(), NokhwaError> {
             if self.already_in_use() {
                 return Err(NokhwaError::InitializeError {
                     backend: ApiBackend::AVFoundation,
@@ -1011,26 +1013,53 @@ mod internal {
                 });
             }
             // Space these out for debug purposes
-            if !accepted == YES {
+            // Not `!accepted == YES`: BOOL is an i8 on x86_64, where that never detects NO.
+            if accepted == NO {
                 return Err(NokhwaError::SetPropertyError {
                     property: "lockForConfiguration".to_string(),
                     value: "Locked".to_string(),
                     error: "Lock Rejected".to_string(),
                 });
             }
+            self.locked = true;
             Ok(())
         }
 
-        pub fn unlock(&mut self) {
+        fn unlock(&mut self) {
             if self.locked {
                 self.locked = false;
                 unsafe { msg_send![self.inner, unlockForConfiguration] }
             }
         }
 
-        // thank you ffmpeg
-        pub fn set_all(&mut self, descriptor: CameraFormat) -> Result<(), NokhwaError> {
+        /// Locks the device for configuration, runs `f`, then unlocks it, also when `f` fails
+        /// or panics. `f` gets a shared reference, so it cannot swap out the device that gets
+        /// unlocked. Configurations run one at a time across the process (see `CONFIGURATION`),
+        /// so `f` must not configure another camera.
+        pub fn configure<T>(
+            &mut self,
+            f: impl FnOnce(&Self) -> Result<T, NokhwaError>,
+        ) -> Result<T, NokhwaError> {
+            struct UnlockOnDrop<'a>(&'a mut AVCaptureDevice);
+            impl Drop for UnlockOnDrop<'_> {
+                fn drop(&mut self) {
+                    self.0.unlock();
+                }
+            }
+
+            let _one_at_a_time = CONFIGURATION.lock().unwrap_or_else(PoisonError::into_inner);
             self.lock()?;
+            let locked = UnlockOnDrop(self);
+            f(&*locked.0)
+        }
+
+        pub fn set_all(&mut self, descriptor: CameraFormat) -> Result<(), NokhwaError> {
+            self.configure(|device| device.set_all_locked(descriptor))
+        }
+
+        /// `set_all` for use inside `configure`.
+        // thank you ffmpeg
+        pub fn set_all_locked(&self, descriptor: CameraFormat) -> Result<(), NokhwaError> {
             let format_list = try_ns_arr_to_vec::<AVCaptureDeviceFormat, NokhwaError>(unsafe {
                 msg_send![self.inner, formats]
             })?;
@@ -1083,7 +1112,6 @@ mod internal {
             let _: () = unsafe {
                 msg_send![self.inner, setValue:min_frame_duration forKey:active_video_max_frame_duration]
             };
-            self.unlock();
             Ok(())
         }
 
@@ -1548,7 +1576,7 @@ mod internal {
         }
 
         pub fn set_control(
-            &mut self,
+            &self,
             id: KnownCameraControl,
             value: ControlValueSetter,
         ) -> Result<(), NokhwaError> {
