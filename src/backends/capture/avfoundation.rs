@@ -288,7 +288,13 @@ impl CaptureBackendTrait for AVFoundationCaptureDevice {
     }
 
     fn frame_raw(&mut self) -> Result<Cow<[u8]>, NokhwaError> {
-        let result = match self.frame_buffer_receiver.recv() {
+        // The sender lives in this same struct, so the channel never disconnects: without a
+        // timeout a camera that stops delivering frames (e.g. an unplugged USB webcam) would
+        // block the caller forever.
+        let result = match self
+            .frame_buffer_receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+        {
             Ok(recv) => Ok(Cow::from(recv.0)),
             Err(why) => Err(NokhwaError::ReadFrameError(why.to_string())),
         };
