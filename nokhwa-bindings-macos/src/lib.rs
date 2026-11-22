@@ -209,22 +209,36 @@ mod internal {
             pub static AVMediaTypeTimecode: AVMediaType;
             pub static AVMediaTypeMetadata: AVMediaType;
             pub static AVMediaTypeMuxed: AVMediaType;
+            #[cfg(target_os = "ios")]
             pub static AVMediaTypeMetadataObject: AVMediaType;
             pub static AVMediaTypeDepthData: AVMediaType;
 
             pub static AVCaptureLensPositionCurrent: f32;
+            // These three are marked API_UNAVAILABLE(macos) in the SDK headers; current macOS
+            // SDKs export them in AVFoundation.tbd anyway so linking against a recent SDK
+            // succeeds, but macOS 10.14's AVFoundation.tbd does not, and dyld binds extern
+            // statics (unlike functions) at load time regardless of whether the referencing code
+            // runs. A macOS 10.14 x86_64 build would fail to launch at all if any reachable code
+            // referenced them. iOS has always exported them.
+            #[cfg(target_os = "ios")]
             pub static AVCaptureExposureTargetBiasCurrent: f32;
+            #[cfg(target_os = "ios")]
             pub static AVCaptureExposureDurationCurrent: CMTime;
+            #[cfg(target_os = "ios")]
             pub static AVCaptureISOCurrent: f32;
         }
     }
 
+    #[cfg(target_os = "ios")]
     use crate::core_media::{
-        dispatch_queue_create, AVCaptureExposureDurationCurrent,
-        AVCaptureExposureTargetBiasCurrent, AVCaptureISOCurrent, AVCaptureWhiteBalanceGains,
-        AVMediaTypeAudio, AVMediaTypeClosedCaption, AVMediaTypeDepthData, AVMediaTypeMetadata,
-        AVMediaTypeMetadataObject, AVMediaTypeMuxed, AVMediaTypeSubtitle, AVMediaTypeText,
-        AVMediaTypeTimecode, AVMediaTypeVideo, CGPoint, CMSampleBufferGetImageBuffer,
+        AVCaptureExposureDurationCurrent, AVCaptureExposureTargetBiasCurrent, AVCaptureISOCurrent,
+        AVMediaTypeMetadataObject,
+    };
+    use crate::core_media::{
+        dispatch_queue_create, AVCaptureWhiteBalanceGains, AVMediaTypeAudio,
+        AVMediaTypeClosedCaption, AVMediaTypeDepthData, AVMediaTypeMetadata, AVMediaTypeMuxed,
+        AVMediaTypeSubtitle, AVMediaTypeText, AVMediaTypeTimecode, AVMediaTypeVideo, CGPoint,
+        CMSampleBufferGetImageBuffer,
         CMVideoFormatDescriptionGetDimensions, CVImageBufferRef, CVPixelBufferGetBaseAddress,
         CVPixelBufferGetBaseAddressOfPlane, CVPixelBufferGetBytesPerRowOfPlane,
         CVPixelBufferGetDataSize, CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType,
@@ -663,7 +677,13 @@ mod internal {
                 AVMediaType::ClosedCaption => unsafe { AVMediaTypeClosedCaption.0 },
                 AVMediaType::DepthData => unsafe { AVMediaTypeDepthData.0 },
                 AVMediaType::Metadata => unsafe { AVMediaTypeMetadata.0 },
+                // AVMediaTypeMetadataObject does not exist on macOS below 10.15; see its `extern`
+                // declaration. No real AVCaptureDevice ever reports this media type there, so
+                // this is unreachable in practice, not a silent behavior change.
+                #[cfg(target_os = "ios")]
                 AVMediaType::MetadataObject => unsafe { AVMediaTypeMetadataObject.0 },
+                #[cfg(not(target_os = "ios"))]
+                AVMediaType::MetadataObject => std::ptr::null_mut(),
                 AVMediaType::Muxed => unsafe { AVMediaTypeMuxed.0 },
                 AVMediaType::Subtitle => unsafe { AVMediaTypeSubtitle.0 },
                 AVMediaType::Text => unsafe { AVMediaTypeText.0 },
@@ -686,7 +706,16 @@ mod internal {
                     Ok(AVMediaType::DepthData)
                 } else if compare_ns_string(value, (AVMediaTypeMetadata).clone()) {
                     Ok(AVMediaType::Metadata)
-                } else if compare_ns_string(value, (AVMediaTypeMetadataObject).clone()) {
+                } else if {
+                    #[cfg(target_os = "ios")]
+                    {
+                        compare_ns_string(value, (AVMediaTypeMetadataObject).clone())
+                    }
+                    #[cfg(not(target_os = "ios"))]
+                    {
+                        false
+                    }
+                } {
                     Ok(AVMediaType::MetadataObject)
                 } else if compare_ns_string(value, (AVMediaTypeMuxed).clone()) {
                     Ok(AVMediaType::Muxed)
@@ -1301,6 +1330,13 @@ mod internal {
             let exposure_bias: f32 = unsafe { msg_send![self.inner, exposureTargetBias] };
             let exposure_bias_min: f32 = unsafe { msg_send![self.inner, minExposureTargetBias] };
             let exposure_bias_max: f32 = unsafe { msg_send![self.inner, maxExposureTargetBias] };
+            // AVCaptureExposureTargetBiasCurrent (the real "unset" sentinel) does not exist on
+            // macOS below 10.15; fall back to the device's present value, which is only ever used
+            // here as descriptive metadata, never fed back into AVFoundation.
+            #[cfg(target_os = "ios")]
+            let exposure_bias_default = unsafe { AVCaptureExposureTargetBiasCurrent };
+            #[cfg(not(target_os = "ios"))]
+            let exposure_bias_default = exposure_bias;
 
             controls.push(CameraControl::new(
                 KnownCameraControl::Other(4),
@@ -1310,7 +1346,7 @@ mod internal {
                     max: exposure_bias_max as f64,
                     value: exposure_bias as f64,
                     step: f32::MIN_POSITIVE as f64,
-                    default: unsafe { AVCaptureExposureTargetBiasCurrent } as f64,
+                    default: exposure_bias_default as f64,
                 },
                 vec![],
                 true,
@@ -1322,6 +1358,11 @@ mod internal {
             let exposure_duration_max: CMTime =
                 unsafe { msg_send![active_format, maxExposureDuration] };
 
+            #[cfg(target_os = "ios")]
+            let exposure_duration_default = unsafe { AVCaptureExposureDurationCurrent.value };
+            #[cfg(not(target_os = "ios"))]
+            let exposure_duration_default = exposure_duration.value;
+
             controls.push(CameraControl::new(
                 KnownCameraControl::Gamma,
                 "ExposureDuration".to_string(),
@@ -1330,7 +1371,7 @@ mod internal {
                     max: exposure_duration_max.value,
                     value: exposure_duration.value,
                     step: 1,
-                    default: unsafe { AVCaptureExposureDurationCurrent.value },
+                    default: exposure_duration_default,
                 },
                 if exposure_custom == YES {
                     vec![
@@ -1347,6 +1388,11 @@ mod internal {
             let exposure_iso_min: f32 = unsafe { msg_send![active_format, minISO] };
             let exposure_iso_max: f32 = unsafe { msg_send![active_format, maxISO] };
 
+            #[cfg(target_os = "ios")]
+            let exposure_iso_default = unsafe { AVCaptureISOCurrent };
+            #[cfg(not(target_os = "ios"))]
+            let exposure_iso_default = exposure_iso;
+
             controls.push(CameraControl::new(
                 KnownCameraControl::Brightness,
                 "ExposureISO".to_string(),
@@ -1355,7 +1401,7 @@ mod internal {
                     max: exposure_iso_max as f64,
                     value: exposure_iso as f64,
                     step: f32::MIN_POSITIVE as f64,
-                    default: unsafe { AVCaptureISOCurrent } as f64,
+                    default: exposure_iso_default as f64,
                 },
                 if exposure_custom == YES {
                     vec![
@@ -1588,6 +1634,19 @@ mod internal {
 
             match id {
                 KnownCameraControl::Brightness => {
+                    // setExposureModeCustomWithDuration:ISO:'s "leave this one as-is" sentinel
+                    // (AVCaptureExposureDurationCurrent) does not exist on macOS below 10.15; see
+                    // its `extern` declaration. Disable manual ISO there rather than guess at an
+                    // untested substitute.
+                    #[cfg(not(target_os = "ios"))]
+                    return Err(NokhwaError::SetPropertyError {
+                        property: id.to_string(),
+                        value: value.to_string(),
+                        error: "Manual ISO control is not supported on this platform".to_string(),
+                    });
+
+                    #[cfg(target_os = "ios")]
+                    {
                     let isoctrl = controls.get(&id).ok_or(NokhwaError::SetPropertyError {
                         property: id.to_string(),
                         value: value.to_string(),
@@ -1632,8 +1691,23 @@ mod internal {
                     };
 
                     Ok(())
+                    }
                 }
                 KnownCameraControl::Gamma => {
+                    // setExposureModeCustomWithDuration:ISO:'s "leave this one as-is" sentinel
+                    // (AVCaptureISOCurrent) does not exist on macOS below 10.15; see its `extern`
+                    // declaration. Disable manual exposure duration there rather than guess at an
+                    // untested substitute.
+                    #[cfg(not(target_os = "ios"))]
+                    return Err(NokhwaError::SetPropertyError {
+                        property: id.to_string(),
+                        value: value.to_string(),
+                        error: "Manual exposure duration control is not supported on this platform"
+                            .to_string(),
+                    });
+
+                    #[cfg(target_os = "ios")]
+                    {
                     let duration_ctrl = controls.get(&id).ok_or(NokhwaError::SetPropertyError {
                         property: id.to_string(),
                         value: value.to_string(),
@@ -1690,6 +1764,7 @@ mod internal {
                     };
 
                     Ok(())
+                    }
                 }
                 KnownCameraControl::WhiteBalance => {
                     let wb_enum_value = controls.get(&id).ok_or(NokhwaError::SetPropertyError {
